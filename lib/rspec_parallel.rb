@@ -3,6 +3,8 @@ $LOAD_PATH << File.dirname(__FILE__)
 require 'progressbar'
 require 'color_helper'
 require 'thread'
+require 'rexml/document'
+include REXML
 include ColorHelpers
 
 class Rspec_parallel
@@ -150,7 +152,7 @@ class Rspec_parallel
       end
     end
 
-    generate_reports(end_time - start_time, rerun && separate_rerun_report)
+    generate_reports(end_time - start_time, rerun && !separate_rerun_report)
   end
 
   def get_case_list
@@ -325,7 +327,7 @@ class Rspec_parallel
     @doc.elements.each("result/suites/suite/cases/case") do |c|
       if c.get_elements("errorDetails")[0]
         rerun_cmd = c.get_elements("rerunCommand")[0].text
-        line = rerun_cmd.split('#')[0].gsub('rspec ./', @options[:case_folder]).strip
+        line = rerun_cmd.split('#')[0].gsub('rspec ', '').strip
         @queue << line
       end
     end
