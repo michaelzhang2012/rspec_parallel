@@ -549,18 +549,17 @@ class Rspec_parallel
     stdout_list.each {|s| stdout += s}
     stderr_list.each {|s| stderr += s}
 
-    @summary_report.puts "<suite>"
-    @summary_report.puts "<file>#{file_name}</file>"
-    @summary_report.puts "<name>#{name}</name>"
-    @summary_report.puts "<stdout>"
-    @summary_report.puts stdout.encode({:xml => :text}) if stdout.length > 0
-    @summary_report.puts "</stdout>"
-    @summary_report.puts "<stderr></stderr>"
+    @summary_report += "<suite>\n"
+    @summary_report += "<file>#{file_name}</file>\n"
+    @summary_report += "<name>#{name}</name>\n"
+    @summary_report += "<stdout>\n"
+    @summary_report += stdout.encode({:xml => :text}) if stdout.length > 0
+    @summary_report += "</stdout>\n"
     @summary_report += "<stderr>\n"
     @summary_report += stderr.encode({:xml => :text}) if stderr.length > 0
     @summary_report += "</stderr>\n"
-    @summary_report.puts "<duration>#{suite_duration}</duration>"
-    @summary_report.puts "<cases>"
+    @summary_report += "<duration>#{suite_duration}</duration>\n"
+    @summary_report += "<cases>\n"
 
     ff = File.new(file_name, 'w')
     ff.puts '<?xml version="1.0" encoding="UTF-8"?>'
@@ -572,23 +571,23 @@ class Rspec_parallel
       test_name = case_info['test_name']
       test_name += " (PENDING)" if case_info['status'] == 'pending'
       test_name = test_name.encode({:xml => :attr})
-      @summary_report.puts "<case>"
-      @summary_report.puts "<duration>#{case_info['duration']}</duration>"
-      @summary_report.puts "<className>#{case_info['class_name']}</className>"
-      @summary_report.puts "<testName>#{test_name}</testName>"
-      @summary_report.puts "<skipped>#{case_info['status'] == 'pending'}</skipped>"
+      @summary_report += "<case>\n"
+      @summary_report += "<duration>#{case_info['duration']}</duration>\n"
+      @summary_report += "<className>#{case_info['class_name']}</className>\n"
+      @summary_report += "<testName>#{test_name}</testName>\n"
+      @summary_report += "<skipped>#{case_info['status'] == 'pending'}</skipped>\n"
 
       ff.puts "<testcase name=#{test_name} time=\"#{case_info['duration']}\">"
       ff.puts "<skipped/>" if case_info['status'] == 'pending'
 
       if case_info['status'] == 'fail'
-        @summary_report.puts "<errorStackTrace>"
-        @summary_report.puts case_info['error_message'].encode({:xml => :text}).gsub('Failure/Error: ', '')
-        @summary_report.puts case_info['error_stack_trace'].encode({:xml => :text}).gsub('# ', '')
-        @summary_report.puts "</errorStackTrace>"
-        @summary_report.puts "<errorDetails>"
-        @summary_report.puts case_info['error_details'].encode({:xml => :text})
-        @summary_report.puts "</errorDetails>"
+        @summary_report += "<errorStackTrace>\n"
+        @summary_report += case_info['error_message'].encode({:xml => :text}).gsub('Failure/Error: ', '')
+        @summary_report += case_info['error_stack_trace'].encode({:xml => :text}).gsub('# ', '')
+        @summary_report += "</errorStackTrace>\n"
+        @summary_report += "<errorDetails>\n"
+        @summary_report += case_info['error_details'].encode({:xml => :text})
+        @summary_report += "</errorDetails>\n"
         @summary_report += "<rerunCommand>#{case_info['rerun_cmd'].encode({:xml => :text})}</rerunCommand>\n"
 
         if case_info['error_message'].include? "expected"
@@ -604,14 +603,14 @@ class Rspec_parallel
         ff.puts "</failure>"
         ff.puts "<rerunCommand>#{case_info['rerun_cmd'].encode({:xml => :text})}</rerunCommand>"
       end
-      @summary_report.puts "<failedSince>0</failedSince>"
-      @summary_report.puts "</case>"
+      @summary_report += "<failedSince>0</failedSince>\n"
+      @summary_report += "</case>\n"
 
       ff.puts "</testcase>"
     end
 
-    @summary_report.puts "</cases>"
-    @summary_report.puts "</suite>"
+    @summary_report += "</cases>\n"
+    @summary_report += "</suite>"
 
     ff.puts "<system-out>"
     ff.puts stdout.encode({:xml => :text}) if stdout.length > 0
