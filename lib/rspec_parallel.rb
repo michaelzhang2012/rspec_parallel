@@ -6,34 +6,52 @@ require 'thread'
 include ColorHelpers
 
 class Rspec_parallel
-  def initialize(thread_number, case_folder, report_folder, filter_options = {}, env_list = [], show_pending = false)
-    @thread_number = thread_number
-    if thread_number < 1
-      puts red("threads_number can't be less than 1")
-      return
-    end
-    @case_folder = case_folder
-    @filter_options = filter_options
-    @env_list = env_list
-    @show_pending = show_pending
-    @queue = Queue.new
-    @report_folder = report_folder
 
-    @case_info_list = []
-    @fr = File.new(File.join(@report_folder, '/junitResult.xml'), 'w')
-    @fr.puts "<?xml version='1.0' encoding='UTF-8'?>"
-    @fr.puts "<result>"
-    @fr.puts "<suites>"
+  MAX_RERUN_TIMES = 10
+
+  def initialize(options = {})
+    @options = {:thread_number => 4, :case_folder => "./spec/", :report_folder => "./reports/",
+                :filter => {}, :env_list => [], :show_pending => false, :rerun => false,
+                :separate_rerun_report => true}.merge(options)
   end
 
   def run_tests()
-    # use lock to avoid output mess up
-    @lock = Mutex.new
-    # timer of rspec task
-    start_time = Time.now
+    start_time = Time.now # timer of rspec task
+    @queue = Queue.new # store all tests to run
+    @case_info_list = [] # store results of all tests
+    @lock = Mutex.new # use lock to avoid output mess up
 
-    puts yellow("threads number: #{@thread_number}\n")
-    parse_case_list
+    thread_number = @options[:thread_number]
+    if thread_number < 1
+      puts red("threads_number can't be less than 1")
+      exit(1)
+    end
+    puts yellow("threads number: #{thread_number}\n")
+
+    rerun = @options[:rerun]
+    separate_rerun_report = @options[:separate_rerun_report]
+    if rerun && separate_rerun_report
+      @report_folder = get_rerun_folder(true)
+      if @report_folder.include? "rerun#{MAX_RERUN_TIMES + 1}"
+        puts yellow("rerun task has been executed for #{MAX_RERUN_TIMES}" +
+                    " times, maybe you should start a new run")
+        exit(1)
+      end
+    else
+      @report_folder = @options[:report_folder]
+    end
+
+    filter = @options[:filter]
+    if rerun
+      get_failed_cases
+    else
+      parse_case_list(filter)
+    end
+
+    if @queue.empty?
+      puts yellow("no cases to run, exit.")
+      return
+    end
 
     pbar = ProgressBar.new("0/#{@queue.size}", @queue.size, $stdout)
     pbar.format_arguments = [:title, :percentage, :bar, :stat]
@@ -46,13 +64,14 @@ class Rspec_parallel
     Thread.abort_on_exception = false
     threads = []
 
-    @thread_number.times do |i|
+    thread_number.times do |i|
       threads << Thread.new do
         until @queue.empty?
           task = @queue.pop
           env_extras = {}
-          if @env_list && @env_list[i]
-            env_extras = @env_list[i]
+          env_list = @options[:env_list]
+          if env_list && env_list[i]
+            env_extras = env_list[i]
           end
           t1 = Time.now
           task_output = run_task(task, env_extras)
@@ -99,19 +118,19 @@ class Rspec_parallel
     pbar.finish
 
     # print pending cases if configured
-    if @show_pending && pending_number > 0
+    show_pending = @options[:show_pending]
+    if show_pending && pending_number > 0
       $stdout.print "\n"
       puts "Pending:"
       pending_list.each {|case_info|
         puts "  #{yellow(case_info['test_name'])}\n"
         $stdout.print cyan("#{case_info['pending_info']}")
       }
-      $stdout.print "\n"
     end
 
     # print total time and summary result
     end_time = Time.now
-    puts "Finished in #{format_time(end_time-start_time)}\n"
+    puts "\nFinished in #{format_time(end_time-start_time)}\n"
     if failure_number > 0
       $stdout.print red("#{case_number} examples, #{failure_number} failures")
       $stdout.print red(", #{pending_number} pending") if pending_number > 0
@@ -122,31 +141,21 @@ class Rspec_parallel
     end
     $stdout.print "\n"
 
-    # record failed rspec examples to rerun.sh
+    # print rerun command of failed examples
     unless failure_list.empty?
-      rerun_file = File.new('./rerun.sh', 'w', 0777)
       $stdout.print "\nFailed examples:\n\n"
       failure_list.each do |case_info|
-        rerun_file.puts "echo ----#{case_info['test_name']}"
-        rerun_file.puts case_info['rerun_cmd']
         $stdout.print red(case_info['rerun_cmd'].split(' # ')[0])
-        $stdout.print cyan(" # #{case_info['test_name']}")
-        $stdout.print "\n"
+        $stdout.print cyan(" # #{case_info['test_name']}\n")
       end
-      rerun_file.close
     end
 
-    generate_ci_report
-
-    @fr.puts "</suites>"
-    @fr.puts "<duration>#{end_time - start_time}</duration>"
-    @fr.puts "<keepLongStdio>false</keepLongStdio>"
-    @fr.puts "</result>"
-    @fr.close
+    generate_reports(end_time - start_time, rerun && separate_rerun_report)
   end
 
   def get_case_list
-    file_list = `grep -rl '' #{@case_folder}`
+    case_folder = @options[:case_folder]
+    file_list = `grep -rl '' #{case_folder}`
     case_list = []
     file_list.each_line { |filename|
       unless filename.include? "_spec.rb"
@@ -231,14 +240,14 @@ class Rspec_parallel
     case_list
   end
 
-  def parse_case_list()
+  def parse_case_list(filter)
     all_case_list = get_case_list
     pattern_filter_list = []
     tags_filter_list = []
 
-    if @filter_options["pattern"]
+    if filter["pattern"]
       all_case_list.each { |c|
-        if c["line"].match(@filter_options["pattern"])
+        if c["line"].match(filter["pattern"])
           pattern_filter_list << c
         end
       }
@@ -246,10 +255,10 @@ class Rspec_parallel
       pattern_filter_list = all_case_list
     end
 
-    if @filter_options["tags"]
+    if filter["tags"]
       include_tags = []
       exclude_tags = []
-      all_tags = @filter_options["tags"].split(",")
+      all_tags = filter["tags"].split(",")
       all_tags.each { |tag|
         if tag.start_with? "~"
           exclude_tags << tag.gsub("~", "")
@@ -267,9 +276,59 @@ class Rspec_parallel
       tags_filter_list = pattern_filter_list
     end
 
+    tags_filter_list = reorder_tests(tags_filter_list)
+
     tags_filter_list.each { |t|
       @queue << t["line"]
     }
+  end
+
+  def get_rerun_folder(get_next=false)
+    rerun_folder = @options[:report_folder]
+    i = MAX_RERUN_TIMES
+    while(i > 0)
+      if File.exists? File.join(rerun_folder, "rerun#{i}")
+        if get_next
+          rerun_folder = File.join(rerun_folder, "rerun#{i + 1}")
+        else
+          rerun_folder = File.join(rerun_folder, "rerun#{i}")
+        end
+        break
+      end
+      i -= 1
+    end
+    if get_next && (rerun_folder.include? "rerun") == false
+      rerun_folder = File.join(rerun_folder, 'rerun1')
+    end
+    rerun_folder
+  end
+
+  def get_failed_cases
+    if @options[:separate_rerun_report]
+      last_report_folder = get_rerun_folder
+      last_report_file_path = File.join(last_report_folder, "junitResult.xml")
+    else
+      last_report_file_path = File.join(@report_folder, "junitResult.xml")
+    end
+    unless File.exists? last_report_file_path
+      puts yellow("can't find result of last run")
+      exit(1)
+    end
+    report_file = File.new(last_report_file_path)
+    begin
+      @doc = REXML::Document.new report_file
+    rescue
+      puts red("invalid format of report xml")
+      exit(1)
+    end
+
+    @doc.elements.each("result/suites/suite/cases/case") do |c|
+      if c.get_elements("errorDetails")[0]
+        rerun_cmd = c.get_elements("rerunCommand")[0].text
+        line = rerun_cmd.split('#')[0].gsub('rspec ./', @options[:case_folder]).strip
+        @queue << line
+      end
+    end
   end
 
   def run_task(task, env_extras)
@@ -286,6 +345,10 @@ class Rspec_parallel
     output
   end
 
+  def reorder_tests(case_list)
+    return case_list
+  end
+
   def format_time(t)
     time_str = ''
     time_str += (t / 3600).to_i.to_s + " hours " if t > 3600
@@ -299,8 +362,9 @@ class Rspec_parallel
     result = {}
     logs = []
     str.each_line {|l| logs << l}
+    return nil if logs == []
 
-    stdout = ''
+    stderr = ''
     unless logs[0].start_with? 'Run options:'
       clear_logs = []
       logs_start = false
@@ -309,6 +373,26 @@ class Rspec_parallel
           logs_start = true
         end
         if logs_start
+          clear_logs << logs[i]
+        else
+          stderr += logs[i]
+        end
+      end
+      logs = clear_logs
+    end
+    result['stderr'] = stderr
+
+    stdout = ''
+    if logs[4].strip != ''
+      clear_logs = []
+      stdout_start = true
+      for i in 0..logs.length-1
+        if i < 3
+          clear_logs << logs[i]
+        elsif stdout_start && logs[i+1].strip == ''
+          clear_logs << logs[i]
+          stdout_start = false
+        elsif !stdout_start
           clear_logs << logs[i]
         else
           stdout += logs[i]
@@ -362,7 +446,13 @@ class Rspec_parallel
     result
   end
 
-  def generate_ci_report
+  def generate_reports(time, update_report)
+    %x[mkdir #{@report_folder}] unless File.exists? @report_folder
+    @summary_report = ""
+    @summary_report += "<?xml version='1.0' encoding='UTF-8'?>\n"
+    @summary_report += "<result>\n"
+    @summary_report += "<suites>\n"
+
     class_name_list = []
     @case_info_list.each do |case_info|
       class_name_list << case_info['class_name']
@@ -378,6 +468,49 @@ class Rspec_parallel
       end
       generate_single_file_report(temp_case_info_list)
     end
+
+    if update_report
+      update_ci_report
+    end
+
+    @summary_report += "</suites>\n"
+    @summary_report += "<duration>#{time}</duration>\n"
+    @summary_report += "<keepLongStdio>false</keepLongStdio>\n"
+    @summary_report += "</result>\n"
+
+    report_file_path = File.join(@report_folder, 'junitResult.xml')
+    fr = File.new(report_file_path, 'w')
+    if update_report
+      fr.puts @doc
+    else
+      fr.puts @summary_report
+    end
+    fr.close
+  end
+
+  def update_ci_report
+    @doc.elements.each("result/suites/suite/cases/case") do |c1|
+      if c1.get_elements("errorDetails")[0]
+        test_name = c1.get_elements("testName")[0].text
+        @case_info_list.each do |c2|
+          if test_name == c2['test_name'].encode({:xml => :attr})
+            c1.get_elements("duration")[0].text = c2['duration']
+            if c2['status'] == 'fail'
+              text = c2['error_message'].gsub('Failure/Error: ', '') + "\n"
+              text += c2['error_stack_trace'].gsub('# ', '')
+              c1.get_elements("errorStackTrace")[0].text = text
+              c1.get_elements("errorDetails")[0].text = c2['error_details']
+              c1.get_elements("rerunCommand")[0].text = c2['rerun_cmd']
+            else
+              c1.delete c1.get_elements("errorDetails")[0]
+              c1.delete c1.get_elements("errorStackTrace")[0]
+              c1.delete c1.get_elements("rerunCommand")[0]
+            end
+            break
+          end
+        end
+      end
+    end
   end
 
   def generate_single_file_report(case_info_list)
@@ -391,11 +524,14 @@ class Rspec_parallel
     error_num = 0
     pending_num = 0
     stdout = ''
+    stderr = ''
     stdout_list = []
+    stderr_list = []
     case_desc_list = []
     case_info_list.each do |case_info|
       suite_duration += case_info['duration']
       stdout_list << case_info['stdout']
+      stderr_list << case_info['stderr']
       case_desc_list << case_info['test_desc']
       if case_info['status'] == 'fail'
         if case_info['error_message'].include? "expect"
@@ -408,18 +544,23 @@ class Rspec_parallel
       end
     end
     stdout_list.uniq!
+    stderr_list.uniq!
     case_desc_list.sort!
     stdout_list.each {|s| stdout += s}
+    stderr_list.each {|s| stderr += s}
 
-    @fr.puts "<suite>"
-    @fr.puts "<file>#{file_name}</file>"
-    @fr.puts "<name>#{name}</name>"
-    @fr.puts "<stdout>"
-    @fr.puts stdout.encode({:xml => :text}) if stdout.length > 0
-    @fr.puts "</stdout>"
-    @fr.puts "<stderr></stderr>"
-    @fr.puts "<duration>#{suite_duration}</duration>"
-    @fr.puts "<cases>"
+    @summary_report.puts "<suite>"
+    @summary_report.puts "<file>#{file_name}</file>"
+    @summary_report.puts "<name>#{name}</name>"
+    @summary_report.puts "<stdout>"
+    @summary_report.puts stdout.encode({:xml => :text}) if stdout.length > 0
+    @summary_report.puts "</stdout>"
+    @summary_report.puts "<stderr></stderr>"
+    @summary_report += "<stderr>\n"
+    @summary_report += stderr.encode({:xml => :text}) if stderr.length > 0
+    @summary_report += "</stderr>\n"
+    @summary_report.puts "<duration>#{suite_duration}</duration>"
+    @summary_report.puts "<cases>"
 
     ff = File.new(file_name, 'w')
     ff.puts '<?xml version="1.0" encoding="UTF-8"?>'
@@ -428,25 +569,27 @@ class Rspec_parallel
     case_desc_list.each do |case_desc|
       i = case_info_list.index {|c| c['test_desc'] == case_desc}
       case_info = case_info_list[i]
-      test_name = case_info['test_name'].encode({:xml => :attr})
+      test_name = case_info['test_name']
       test_name += " (PENDING)" if case_info['status'] == 'pending'
-      @fr.puts "<case>"
-      @fr.puts "<duration>#{case_info['duration']}</duration>"
-      @fr.puts "<className>#{case_info['class_name']}</className>"
-      @fr.puts "<testName>#{test_name}</testName>"
-      @fr.puts "<skipped>#{case_info['status'] == 'pending'}</skipped>"
+      test_name = test_name.encode({:xml => :attr})
+      @summary_report.puts "<case>"
+      @summary_report.puts "<duration>#{case_info['duration']}</duration>"
+      @summary_report.puts "<className>#{case_info['class_name']}</className>"
+      @summary_report.puts "<testName>#{test_name}</testName>"
+      @summary_report.puts "<skipped>#{case_info['status'] == 'pending'}</skipped>"
 
-      ff.puts "<testcase name=#{test_name.encode({:xml => :attr})} time=\"#{case_info['duration']}\">"
+      ff.puts "<testcase name=#{test_name} time=\"#{case_info['duration']}\">"
       ff.puts "<skipped/>" if case_info['status'] == 'pending'
 
       if case_info['status'] == 'fail'
-        @fr.puts "<errorStackTrace>"
-        @fr.puts case_info['error_message'].encode({:xml => :text}).gsub('Failure/Error: ', '')
-        @fr.puts case_info['error_stack_trace'].encode({:xml => :text}).gsub('# ', '')
-        @fr.puts "</errorStackTrace>"
-        @fr.puts "<errorDetails>"
-        @fr.puts case_info['error_details'].encode({:xml => :text})
-        @fr.puts "</errorDetails>"
+        @summary_report.puts "<errorStackTrace>"
+        @summary_report.puts case_info['error_message'].encode({:xml => :text}).gsub('Failure/Error: ', '')
+        @summary_report.puts case_info['error_stack_trace'].encode({:xml => :text}).gsub('# ', '')
+        @summary_report.puts "</errorStackTrace>"
+        @summary_report.puts "<errorDetails>"
+        @summary_report.puts case_info['error_details'].encode({:xml => :text})
+        @summary_report.puts "</errorDetails>"
+        @summary_report += "<rerunCommand>#{case_info['rerun_cmd'].encode({:xml => :text})}</rerunCommand>\n"
 
         if case_info['error_message'].include? "expected"
           type = "RSpec::Expectations::ExpectationNotMetError"
@@ -459,20 +602,22 @@ class Rspec_parallel
         ff.puts case_info['error_message'].encode({:xml => :text}).gsub('Failure/Error: ', '')
         ff.puts case_info['error_stack_trace'].encode({:xml => :text}).gsub('# ', '')
         ff.puts "</failure>"
+        ff.puts "<rerunCommand>#{case_info['rerun_cmd'].encode({:xml => :text})}</rerunCommand>"
       end
-      @fr.puts "<failedSince>0</failedSince>"
-      @fr.puts "</case>"
+      @summary_report.puts "<failedSince>0</failedSince>"
+      @summary_report.puts "</case>"
 
       ff.puts "</testcase>"
     end
 
-    @fr.puts "</cases>"
-    @fr.puts "</suite>"
+    @summary_report.puts "</cases>"
+    @summary_report.puts "</suite>"
 
     ff.puts "<system-out>"
     ff.puts stdout.encode({:xml => :text}) if stdout.length > 0
     ff.puts "</system-out>"
     ff.puts "<system-err>"
+    ff.puts stderr.encode({:xml => :text}) if stderr.length > 0
     ff.puts "</system-err>"
     ff.puts "</testsuite>"
     ff.close
