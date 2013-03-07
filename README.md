@@ -1,4 +1,4 @@
 rspec_parallel
 ==============
 
-run rspec examplefdfd fdf dfdfdfs in parallel
+run rspecd fdf dfdfdfs in parallel
